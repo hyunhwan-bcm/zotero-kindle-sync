@@ -9,3 +9,5 @@ pref("extensions.zoterokindle.autoSync", true);
 pref("extensions.zoterokindle.autoSyncMinutes", "5");
 pref("extensions.zoterokindle.layout", "collections");
 pref("extensions.zoterokindle.allCollections", true);
+pref("extensions.zoterokindle.nameTag", "none");
+pref("extensions.zoterokindle.pendingRepair", false);

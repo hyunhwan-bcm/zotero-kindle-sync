@@ -104,7 +104,8 @@ def load_collections(con):
     return by_item
 
 
-def build_name(row) -> str:
+def build_name(row, tag: str = "") -> str:
+    """'[tag] Author et al. 2024 - Title.pdf'; the tag is the collection name shown by the Kindle."""
     title = row["title"] or row["attTitle"] or row["attKey"]
     year = ""
     if row["date"]:
@@ -116,9 +117,11 @@ def build_name(row) -> str:
     head = " ".join(x for x in (author, year) if x)
     name = f"{head} - {title}" if head else title
     name = sanitize(name)
-    if len(name) > MAX_NAME:
-        name = name[:MAX_NAME].rstrip(" .-")
-    return name + ".pdf"
+    prefix = f"[{sanitize(tag).replace('[', '').replace(']', '')}] " if tag else ""
+    room = MAX_NAME - len(prefix)
+    if len(name) > room:
+        name = name[:max(20, room)].rstrip(" .-")
+    return prefix + name + ".pdf"
 
 
 def main():
@@ -131,6 +134,8 @@ def main():
     ap.add_argument("--prune", action="store_true", help="delete mirror files that are no longer in Zotero")
     ap.add_argument("--layout", choices=["collections", "library"], default="collections",
                     help="folder tree per Zotero collection (default) or one folder per library")
+    ap.add_argument("--name-tag", choices=["leaf", "path", "none"], default="none",
+                    help="collection tag at the front of the file name: innermost collection (default), full path, or none")
     ap.add_argument("--one-collection", action="store_true",
                     help="copy a paper into its first collection only instead of every collection")
     args = ap.parse_args()
@@ -162,7 +167,13 @@ def main():
     con.close()
     shutil.rmtree(db.parent, ignore_errors=True)
 
-    used, new_manifest = set(), {}
+    def tag_for(d):
+        if args.name_tag == "none":
+            return ""
+        return d.replace("/", " / ") if args.name_tag == "path" else d.split("/")[-1]
+
+    # pass 1: where does every attachment go; count clashing names per folder
+    planned, name_count = [], {}
     stats = dict(copied=0, moved=0, kept=0, skipped_removed=0, missing=0)
     for r in rows:
         if args.library and r["libName"] not in args.library:
@@ -178,22 +189,23 @@ def main():
             stats["missing"] += 1
             continue
         lib = sanitize(r["libName"])
-        name = build_name(r)
         if args.layout == "collections":
             dirs = sorted(set(item_collections.get(r["parentItemID"] or r["attItemID"], []))) or ["Unfiled"]
             if args.one_collection:
                 dirs = dirs[:1]
-            wanted = [f"{lib}/{d}/{name}" for d in dirs]
+            wanted = [f"{lib}/{d}/{build_name(r, tag_for(d))}" for d in dirs]
         else:
-            wanted = [f"{lib}/{name}"]
-        previous = manifest.get(key, [])
-        rels = []
+            wanted = [f"{lib}/{build_name(r)}"]
+        planned.append((r, key, src, wanted))
         for rel in wanted:
-            # de-duplicate identical names (same paper in two items, multiple PDFs per item)
-            if rel.lower() in used and rel not in previous:
-                rel = rel[:-4] + f" [{r['attKey']}].pdf"
-            used.add(rel.lower())
-            rels.append(rel)
+            name_count[rel.lower()] = name_count.get(rel.lower(), 0) + 1
+
+    # pass 2: copy / move. Every file whose name clashes inside a folder gets its attachment key,
+    # decided from the whole set so the result matches the plugin regardless of ordering.
+    new_manifest = {}
+    for r, key, src, wanted in planned:
+        previous = manifest.get(key, [])
+        rels = [rel[:-4] + f" [{r['attKey']}].pdf" if name_count[rel.lower()] > 1 else rel for rel in wanted]
         stale = [x for x in previous if x not in rels]
         for rel in rels:
             dst = args.mirror / rel

@@ -39,6 +39,19 @@
       <radio value="library" label="One folder per library"/>
     </radiogroup>
     <checkbox label="A paper in several collections is copied into each of them" preference="extensions.zoterokindle.allCollections"/>
+    <hbox align="center">
+      <label value="Collection tag in the file name" style="width: 260px"/>
+      <menulist preference="extensions.zoterokindle.nameTag">
+        <menupopup>
+          <menuitem value="leaf" label="[Collection] title  (innermost collection)"/>
+          <menuitem value="path" label="[Parent / Collection] title  (full path)"/>
+          <menuitem value="none" label="No tag"/>
+        </menupopup>
+      </menulist>
+    </hbox>
+    <description style="opacity: .7">
+      The Kindle shows documents as a flat list and ignores folders. The tag lets you group papers by collection when sorting by title, and find a whole collection by searching for its name.
+    </description>
     <description style="opacity: .7">
       Papers in no collection go to an "Unfiled" folder. Changing the layout moves every paper on the Kindle on the next sync.
     </description>

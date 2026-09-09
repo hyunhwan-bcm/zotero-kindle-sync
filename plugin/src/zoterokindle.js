@@ -102,7 +102,11 @@ ZoteroKindle = {
         this.setPref("autoSync", on);
         auto.setAttribute("checked", on ? "true" : "false");
       });
-      toolsPopup.append(sep, sync, dry, auto);
+      const undo = doc.createXULElement("menuitem");
+      undo.id = "zk-menu-undo";
+      undo.setAttribute("label", "Undo Kindle Removals (clear kindle-removed tags)");
+      undo.addEventListener("command", () => this.clearRemovedTags(win));
+      toolsPopup.append(sep, sync, dry, auto, undo);
       toolsPopup.addEventListener("popupshowing", () => {
         auto.setAttribute("checked", this.pref("autoSync") ? "true" : "false");
       });
@@ -138,11 +142,15 @@ ZoteroKindle = {
       itemMenu.appendChild(send);
     }
     this.windows.add(win);
+    if (this.pref("pendingRepair")) {
+      this.setPref("pendingRepair", false);
+      win.setTimeout(() => this.clearRemovedTags(win), 15 * 1000);
+    }
     if (!this.timerWin) this.startScheduler(win);
   },
 
   removeFromWindow(win) {
-    for (const id of ["zk-menu-sep", "zk-menu-sync", "zk-menu-dry", "zk-menu-auto", "zk-item-send", "zk-tb-sync", "zk-tb-dry"]) {
+    for (const id of ["zk-menu-sep", "zk-menu-sync", "zk-menu-dry", "zk-menu-auto", "zk-menu-undo", "zk-item-send", "zk-tb-sync", "zk-tb-dry"]) {
       win.document.getElementById(id)?.remove();
     }
     this.windows.delete(win);
@@ -225,7 +233,8 @@ ZoteroKindle = {
     return s.replace(/\s+/g, " ").replace(/^[ .]+|[ .]+$/g, "");
   },
 
-  buildName(att) {
+  /* tag = collection name shown at the front of the file name, so the Kindle library groups by it */
+  buildName(att, tag = "") {
     const parent = att.parentItem;
     let title = parent ? parent.getField("title") : att.getField("title");
     title = title || att.key;
@@ -238,8 +247,10 @@ ZoteroKindle = {
       head = [author, year].filter(Boolean).join(" ");
     }
     let name = this.sanitize(head ? `${head} - ${title}` : title);
-    if (name.length > this.MAX_NAME) name = name.slice(0, this.MAX_NAME).replace(/[ .-]+$/, "");
-    return name + ".pdf";
+    const prefix = tag ? `[${this.sanitize(tag).replace(/[\[\]]/g, "")}] ` : "";
+    const room = this.MAX_NAME - prefix.length;
+    if (name.length > room) name = name.slice(0, Math.max(20, room)).replace(/[ .-]+$/, "");
+    return prefix + name + ".pdf";
   },
 
   libraryName(libraryID) {
@@ -259,8 +270,9 @@ ZoteroKindle = {
   /* mirror-relative paths (with "/") where this attachment belongs */
   relPaths(att) {
     const lib = this.sanitize(this.libraryName(att.libraryID));
-    const name = this.buildName(att);
-    if (this.pref("layout") !== "collections") return [`${lib}/${name}`];
+    if (this.pref("layout") !== "collections") return [`${lib}/${this.buildName(att)}`];
+    const tagMode = this.pref("nameTag") || "leaf"; // none | leaf | path
+    const tagFor = (dir) => (tagMode === "none" ? "" : tagMode === "path" ? dir.replace(/\//g, " / ") : dir.split("/").pop());
     const parent = att.parentItem || att;
     let dirs = parent
       .getCollections()
@@ -272,7 +284,7 @@ ZoteroKindle = {
     dirs = Array.from(new Set(dirs));
     if (!dirs.length) dirs = ["Unfiled"];
     if (!this.pref("allCollections")) dirs = dirs.slice(0, 1);
-    return dirs.map((d) => `${lib}/${d}/${name}`);
+    return dirs.map((d) => `${lib}/${d}/${this.buildName(att, tagFor(d))}`);
   },
 
   /* delete directories left empty after files were moved or removed */
@@ -517,27 +529,31 @@ ZoteroKindle = {
     }
 
     // 2. copy new / changed PDFs into the mirror, move copies whose folder changed
-    const used = new Set();
-    let copied = 0,
-      moved = 0,
-      kept = 0,
-      skipped = 0;
+    // name clashes (same author/year/title in one folder): every clashing file gets its attachment
+    // key appended, decided from the whole set so the result does not depend on iteration order
+    const active = [];
+    const nameCount = new Map();
+    let skipped = 0;
     for (const att of attachments) {
-      const target = att.parentItem || att;
-      if (this.hasTag(target, removedTag)) {
+      if (this.hasTag(att.parentItem || att, removedTag)) {
         skipped++;
         continue;
       }
+      const rels = this.relPaths(att);
+      active.push([att, rels]);
+      for (const rel of rels) nameCount.set(rel.toLowerCase(), (nameCount.get(rel.toLowerCase()) || 0) + 1);
+    }
+    let copied = 0,
+      moved = 0,
+      kept = 0;
+    for (const [att, rels] of active) {
       const src = await att.getFilePathAsync();
       if (!src) continue;
       const key = `${att.libraryID}/${att.key}`;
       const previous = manifest[key] || [];
-      const wanted = [];
-      for (let rel of this.relPaths(att)) {
-        if (used.has(rel.toLowerCase()) && !previous.includes(rel)) rel = rel.replace(/\.pdf$/, ` [${att.key}].pdf`);
-        used.add(rel.toLowerCase());
-        wanted.push(rel);
-      }
+      const wanted = rels.map((rel) =>
+        nameCount.get(rel.toLowerCase()) > 1 ? rel.replace(/\.pdf$/, ` [${att.key}].pdf`) : rel
+      );
       const stale = previous.filter((rel) => !wanted.includes(rel));
       const srcSize = (await IOUtils.stat(src)).size;
       for (const rel of wanted) {
@@ -592,11 +608,12 @@ ZoteroKindle = {
     while ((chunk = await proc.stdout.readString())) out += chunk;
     const { exitCode } = await proc.wait();
 
-    const result = { exitCode, out, actions: 0, noDevice: false, noBooks: false, nothing: false, error: null };
+    const result = { exitCode, out, actions: 0, localRemovals: 0, noDevice: false, noBooks: false, nothing: false, error: null };
     for (const line of out.split("\n")) {
       const m = line.match(/"action":\s*"(\w+)".*?"(?:file|directory)":\s*"([^"]+)"/);
       if (m) {
         result.actions++;
+        if (m[1] === "Remove" && /s2k\.sync\.file-system/.test(line)) result.localRemovals++;
         ui.line(`${dryRun ? "Would " : ""}${m[1]} ${m[2]}`);
       } else if (/Nothing to do/.test(line)) {
         result.nothing = true;
@@ -641,7 +658,27 @@ ZoteroKindle = {
       const m = await this.mirror(p, attachments, ui, { dryRun });
       ui.line(`Mirror: ${m.copied} copied, ${m.moved} moved, ${m.kept} unchanged, ${m.skipped} skipped (removed tag)`);
 
+      if (!dryRun) {
+        // Safety net: preview first and refuse a run that would wipe a large part of the mirror.
+        // A flaky device listing once made s2k believe every paper had been deleted on the Kindle.
+        const preview = await this.runS2K(p, { line() {} }, { dryRun: true });
+        const total = Object.keys(m.manifest).length;
+        if (preview.localRemovals > 5 && preview.localRemovals > total * 0.2) {
+          await this.appendRunLog(p, `REFUSED: would delete ${preview.localRemovals} of ${total} local files`);
+          throw new Error(
+            `Refusing to sync: the Kindle listing would delete ${preview.localRemovals} of ${total} papers ` +
+              `from the mirror. If you really removed them on the Kindle, run Tools → Sync Library to Kindle ` +
+              `again after unplugging and replugging the device.`
+          );
+        }
+      }
+
       const r = await this.runS2K(p, ui, { dryRun });
+      await this.appendRunLog(
+        p,
+        `${dryRun ? "dry-run" : "sync"} exit=${r.exitCode} actions=${r.actions} localRemovals=${r.localRemovals} ` +
+          `noDevice=${r.noDevice} mirror(copied=${m.copied},moved=${m.moved},kept=${m.kept},skipped=${m.skipped})`
+      );
       if (r.noDevice) {
         if (ui.quiet) {
           ui.discard(); // no Kindle plugged in: stay silent
@@ -686,6 +723,38 @@ ZoteroKindle = {
       this.running = false;
       this.currentUI = null;
     }
+  },
+
+  async appendRunLog(p, text) {
+    try {
+      const line = `${new Date().toISOString()} ${text}\n`;
+      await IOUtils.writeUTF8(PathUtils.join(p.stateDir, "runs.log"), line, { mode: "append" });
+    } catch (e) {
+      this.log(`runs.log: ${e.message}`);
+    }
+  },
+
+  /* Undo: remove the "removed on Kindle" tag from every item so the papers are mirrored again */
+  async clearRemovedTags(win, { silent = false } = {}) {
+    const tag = this.pref("removedTag");
+    let n = 0;
+    for (const lib of this.wantedLibraries()) {
+      const items = await Zotero.Items.getAll(lib.libraryID, false, false);
+      for (const it of items) {
+        if (!this.hasTag(it, tag)) continue;
+        await this.setTag(it, tag, false);
+        n++;
+      }
+    }
+    this.log(`cleared "${tag}" from ${n} items`);
+    if (!silent) {
+      const pw = new Zotero.ProgressWindow({ closeOnClick: true });
+      pw.changeHeadline("Kindle Sync");
+      pw.addDescription(`Removed the "${tag}" tag from ${n} item${n === 1 ? "" : "s"}. They will be sent to the Kindle again on the next sync.`);
+      pw.show();
+      pw.startCloseTimer(8000);
+    }
+    return n;
   },
 
   /* ---------------- background scheduler ---------------- */
