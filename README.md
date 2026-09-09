@@ -56,6 +56,11 @@ scripts/build_xpi.sh
 # Zotero → Tools → Plugins → gear icon → Install Plugin From File… → plugin/build/zotero-kindle-sync-0.1.0.xpi
 ```
 
+Zotero's loader (Zotero 7+) rejects a plugin whose manifest lacks `applications.zotero.id`,
+`update_url` or `strict_max_version`; a rejected sideloaded `.xpi` is silently deleted from the
+profile's `extensions/` folder. Installing through the Plugins window avoids the second surprise;
+copying the `.xpi` into `extensions/` by hand installs it *disabled* until enabled in that window.
+
 Then in Settings → Kindle Sync set the path to `s2k` and the mirror folder (e.g. this repo's
 `mirror/`). The plugin adds:
 
