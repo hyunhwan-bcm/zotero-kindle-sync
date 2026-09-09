@@ -728,7 +728,7 @@ ZoteroKindle = {
   async appendRunLog(p, text) {
     try {
       const line = `${new Date().toISOString()} ${text}\n`;
-      await IOUtils.writeUTF8(PathUtils.join(p.stateDir, "runs.log"), line, { mode: "append" });
+      await IOUtils.writeUTF8(PathUtils.join(p.stateDir, "runs.log"), line, { mode: "appendOrCreate" });
     } catch (e) {
       this.log(`runs.log: ${e.message}`);
     }
