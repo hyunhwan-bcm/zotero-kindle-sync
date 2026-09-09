@@ -32,6 +32,7 @@ ZoteroKindle = {
   firstTimer: null,
   timerWin: null,
   lastAutoError: null,
+  currentUI: null,
   prefObservers: [],
 
   init({ id, version, rootURI }) {
@@ -176,20 +177,38 @@ ZoteroKindle = {
   /* buffered progress for background runs: only shown when something happened */
   buffered(win, title) {
     const lines = [];
+    let pw = null; // created when the run is promoted to visible, or at the end if there is news
+    const open = () => {
+      pw = new Zotero.ProgressWindow({ closeOnClick: true });
+      pw.changeHeadline(title);
+      for (const l of lines.slice(-12)) pw.addDescription(l);
+      pw.show();
+    };
     return {
       quiet: true,
       line(text) {
         lines.push(text);
+        if (pw) pw.addDescription(text);
       },
       done(text, ms = 10000) {
-        const pw = new Zotero.ProgressWindow({ closeOnClick: true });
-        pw.changeHeadline(title);
-        for (const l of lines.slice(-10)) pw.addDescription(l);
+        if (!pw) open();
         pw.addDescription(text);
-        pw.show();
         pw.startCloseTimer(ms);
       },
-      discard() {},
+      discard() {
+        if (pw) {
+          pw.addDescription("Kindle already up to date");
+          pw.startCloseTimer(5000);
+        }
+      },
+      /* a user asked for a sync while this background run is going: show it instead of refusing */
+      promote() {
+        if (this.quiet) {
+          this.quiet = false;
+          lines.unshift("(background sync already in progress, showing it)");
+          open();
+        }
+      },
     };
   },
 
@@ -606,12 +625,13 @@ ZoteroKindle = {
 
   async run(win, attachments, { dryRun = false, quiet = false } = {}) {
     if (this.running) {
-      if (!quiet) this.alert(win, "A Kindle sync is already running.");
+      if (!quiet && this.currentUI) this.currentUI.promote?.(); // reveal the silent background run
       return;
     }
     this.running = true;
     const title = quiet ? "Kindle auto-sync" : dryRun ? "Kindle sync preview" : "Syncing to Kindle";
     const ui = quiet ? this.buffered(win, title) : this.progress(win, title);
+    this.currentUI = ui;
     try {
       const p = await this.paths(ui);
       await IOUtils.makeDirectory(p.mirrorDir, { ignoreExisting: true });
@@ -623,7 +643,7 @@ ZoteroKindle = {
 
       const r = await this.runS2K(p, ui, { dryRun });
       if (r.noDevice) {
-        if (quiet) {
+        if (ui.quiet) {
           ui.discard(); // no Kindle plugged in: stay silent
           return;
         }
@@ -649,7 +669,7 @@ ZoteroKindle = {
         }
       }
       this.lastAutoError = null;
-      if (quiet && r.actions === 0) {
+      if (ui.quiet && r.actions === 0) {
         ui.discard(); // device present, already in sync: nothing to report
         return;
       }
@@ -659,11 +679,12 @@ ZoteroKindle = {
       ui.done(dryRun ? `Preview finished: ${summary}` : summary);
     } catch (e) {
       this.log(e.message);
-      if (quiet && this.lastAutoError === e.message) return; // do not nag every tick with the same error
+      if (ui.quiet && this.lastAutoError === e.message) return; // do not nag every tick with the same error
       this.lastAutoError = e.message;
       ui.done(`Failed: ${e.message}`, 15000);
     } finally {
       this.running = false;
+      this.currentUI = null;
     }
   },
 
