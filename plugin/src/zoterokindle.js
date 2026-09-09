@@ -156,6 +156,12 @@ ZoteroKindle = {
     };
   },
 
+  /* mirror-relative paths are stored with "/" (same as scripts/zk_mirror.py);
+     PathUtils.join needs an absolute base and one component per argument */
+  absPath(base, rel) {
+    return PathUtils.join(base, ...rel.split("/").filter(Boolean));
+  },
+
   async readJSON(path, fallback) {
     try {
       return await IOUtils.readJSON(path);
@@ -237,7 +243,7 @@ ZoteroKindle = {
 
     // 1. anything in the manifest that is gone from the mirror was deleted on the Kindle by the last sync
     for (const [key, rel] of Object.entries(manifest)) {
-      if (await IOUtils.exists(PathUtils.join(p.mirrorDir, rel))) continue;
+      if (await IOUtils.exists(this.absPath(p.mirrorDir, rel))) continue;
       const [libraryID, attKey] = key.split("/");
       const att = Zotero.Items.getByLibraryAndKey(Number(libraryID), attKey);
       const target = att ? att.parentItem || att : null;
@@ -265,11 +271,11 @@ ZoteroKindle = {
       const key = `${att.libraryID}/${att.key}`;
       let rel = manifest[key];
       if (!rel) {
-        rel = PathUtils.join(this.sanitize(this.libraryName(att.libraryID)), this.buildName(att));
+        rel = `${this.sanitize(this.libraryName(att.libraryID))}/${this.buildName(att)}`;
         if (used.has(rel.toLowerCase())) rel = rel.replace(/\.pdf$/, ` [${att.key}].pdf`);
       }
       used.add(rel.toLowerCase());
-      const dst = PathUtils.join(p.mirrorDir, rel);
+      const dst = this.absPath(p.mirrorDir, rel);
       let same = false;
       if (await IOUtils.exists(dst)) {
         const [a, b] = await Promise.all([IOUtils.stat(src), IOUtils.stat(dst)]);
@@ -362,7 +368,7 @@ ZoteroKindle = {
         const syncedTag = this.pref("syncedTag");
         for (const att of attachments) {
           const rel = m.manifest[`${att.libraryID}/${att.key}`];
-          if (rel && (await IOUtils.exists(PathUtils.join(p.mirrorDir, rel)))) {
+          if (rel && (await IOUtils.exists(this.absPath(p.mirrorDir, rel)))) {
             await this.setTag(att.parentItem || att, syncedTag, true);
           }
         }
