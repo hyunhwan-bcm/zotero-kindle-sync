@@ -49,12 +49,11 @@ Options: `--library "Personal"` (repeatable) limits libraries; `--data-dir` if Z
 
 ## Plugin
 
-Build and install:
+Install: download the `.xpi` from the [latest release](https://github.com/hyunhwan-bcm/zotero-kindle-sync/releases/latest),
+then Zotero → Tools → Plugins → gear icon → Install Plugin From File…. Zotero checks `updates.json`
+from the latest release for new versions.
 
-```sh
-scripts/build_xpi.sh
-# Zotero → Tools → Plugins → gear icon → Install Plugin From File… → plugin/build/zotero-kindle-sync-0.1.0.xpi
-```
+Build from source: `scripts/build_xpi.sh` writes `plugin/build/zotero-kindle-sync-<version>.xpi`.
 
 Zotero's loader (Zotero 7+) rejects a plugin whose manifest lacks `applications.zotero.id`,
 `update_url` or `strict_max_version`; a rejected sideloaded `.xpi` is silently deleted from the
@@ -64,6 +63,7 @@ copying the `.xpi` into `extensions/` by hand installs it *disabled* until enabl
 Then in Settings → Kindle Sync set the path to `s2k` and the mirror folder (e.g. this repo's
 `mirror/`). The plugin adds:
 
+- a **Kindle button** in the items toolbar (next to New Note). Click to sync, Shift-click for a dry run
 - **Tools → Sync Library to Kindle** and **Preview Kindle Sync (dry run)**
 - **Send to Kindle** in the item context menu (selected items or their PDFs only)
 

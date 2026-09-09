@@ -65,6 +65,20 @@ ZoteroKindle = {
       toolsPopup.append(sep, sync, dry);
     }
 
+    // toolbar button in the items pane, next to "New Note"
+    const anchor = doc.getElementById("zotero-tb-note-add");
+    if (anchor && !doc.getElementById("zk-tb-sync")) {
+      const btn = doc.createXULElement("toolbarbutton");
+      btn.id = "zk-tb-sync";
+      btn.className = "zotero-tb-button";
+      btn.setAttribute("tabindex", "-1");
+      btn.setAttribute("tooltiptext", "Sync library to Kindle (Shift-click: preview only)");
+      btn.setAttribute("image", this.rootURI + "toolbar-icon.svg");
+      btn.style.cssText = "-moz-context-properties: fill, fill-opacity; fill: currentColor;";
+      btn.addEventListener("command", (ev) => this.syncAll(win, { dryRun: ev.shiftKey }));
+      anchor.insertAdjacentElement("afterend", btn);
+    }
+
     const itemMenu = doc.getElementById("zotero-itemmenu");
     if (itemMenu) {
       const send = doc.createXULElement("menuitem");
@@ -77,7 +91,7 @@ ZoteroKindle = {
   },
 
   removeFromWindow(win) {
-    for (const id of ["zk-menu-sep", "zk-menu-sync", "zk-menu-dry", "zk-item-send"]) {
+    for (const id of ["zk-menu-sep", "zk-menu-sync", "zk-menu-dry", "zk-item-send", "zk-tb-sync"]) {
       win.document.getElementById(id)?.remove();
     }
     this.windows.delete(win);
