@@ -5,11 +5,11 @@ by [sync2kindle](https://github.com/rupor-github/sync2kindle) (`s2k`).
 
 ```
 Zotero storage  --copy-->  mirror/<Library>/<Collection>/<Author Year - Title>.pdf  --s2k mtp-->  Kindle documents/zotero
-Zotero tags     <--------  manifest / removed state                    <--s2k mtp--  deleted on Kindle
+Zotero tags     <--------  manifest / removed state                                <--s2k mtp--  deleted on Kindle
 ```
 
 The Kindle only ever sees a mirror folder of copies, so the device sync never touches Zotero's own
-files. When you delete a paper on the Kindle, `s2k` deletes the mirror copy and the item is marked
+files. When you delete a paper on the Kindle, `s2k` deletes the mirror copy and the item is tagged
 so it is not sent again.
 
 ## Layout
@@ -47,8 +47,10 @@ When you delete a PDF on the Kindle, the next `s2k` run removes it from `mirror/
 `zk_mirror.py` run records it in `state/removed.json` and stops copying it. Delete the entry from
 that file to send the paper again.
 
-`--library "Personal"` (repeatable) limits the libraries. `--data-dir` points at a Zotero data
-directory other than `~/Zotero`.
+Options: `--library "Personal"` (repeatable) limits the libraries. `--data-dir` points at a Zotero
+data directory other than `~/Zotero`. `--layout library` uses one folder per library instead of the
+collection tree. `--one-collection` copies a paper into its first collection only. `--name-tag leaf`
+or `path` puts the collection name in brackets at the front of each file name.
 
 ## Plugin
 
@@ -63,36 +65,54 @@ Zotero's loader (Zotero 7+) rejects a plugin whose manifest lacks `applications.
 into the profile's `extensions/` folder. An `.xpi` copied there by hand is installed disabled until
 you enable it in the Plugins window, so installing through that window is simpler.
 
-The plugin works without configuration: the mirror goes to `kindle-sync/mirror` inside the Zotero
+The plugin works without configuration. The mirror goes to `kindle-sync/mirror` inside the Zotero
 data directory and s2k is downloaded on first use. Settings > Kindle Sync lets you change the s2k
-path, the mirror folder, the libraries, the tags, and the background sync. The plugin adds:
+path, the mirror folder, the libraries, the folder layout, the tags, and the background sync.
 
-- two Kindle buttons in the items toolbar, next to New Note: preview (dry run) and sync
-- Tools > Sync Library to Kindle, and Tools > Preview Kindle Sync (dry run)
-- Send to Kindle in the item context menu, for the selected items or their PDFs only
-- background sync: every 5 minutes (configurable) the plugin refreshes the mirror and probes for the
+What the plugin adds to Zotero:
+
+- Two Kindle buttons in the items toolbar, next to New Note: preview (dry run) and sync.
+- Tools > Sync Library to Kindle, Tools > Preview Kindle Sync (dry run), and Tools > Undo Kindle
+  Removals, which clears the `kindle-removed` tag from every item.
+- Send to Kindle in the item context menu, for the selected items or their PDFs only.
+- Background sync. Every 5 minutes (configurable) the plugin refreshes the mirror and probes for the
   Kindle. Nothing is shown while no Kindle is connected. When a connected Kindle receives or loses
   papers, a short summary pops up. Turn it off in Settings or with Tools > Auto-sync to Kindle.
 
+Before every real sync the plugin runs a preview and refuses to continue if the result would delete
+more than a fifth of the mirror. This guards against an incomplete device listing, which happened
+once while the Kindle was busy indexing new files and made s2k believe every paper had been deleted
+on the device. Each run is logged as one line in `state/runs.log`.
+
 The plugin writes two tags back to Zotero: `on-kindle` while a PDF is on the device, and
 `kindle-removed` after it was deleted on the Kindle. An item with the removed tag is skipped until
-you delete the tag.
+you delete the tag, or use Tools > Undo Kindle Removals.
 
-Files are named `[<Collection>] <First author>[ et al.] <year> - <title>.pdf`, truncated to 120
-characters. The Kindle lists documents flat and ignores folders, so the bracketed collection tag is
-what groups papers on the device: sort the library by title, or search for the collection name.
-Settings (CLI: `--name-tag`) switch the tag to the full collection path or turn it off.
+### Folders and names
+
 Folders follow the Zotero collection tree inside a folder per library (`Personal`, or the group
-name): `Personal/01_AI/Sub/…`. Papers in no collection go to `Unfiled`. A paper in several
-collections is copied into each of them unless you turn that off in Settings (CLI: `--one-collection`).
-The alternative layout is one folder per library (Settings, or CLI `--layout library`). Changing the
-layout moves every paper on the Kindle on the next sync. Duplicate names get the attachment key
-appended.
+name), for example `Personal/01_AI/Sub/`. Papers in no collection go to `Unfiled`. A paper in
+several collections is copied into each of them unless you turn that off in Settings. The
+alternative layout is one folder per library. Changing the layout moves every paper on the Kindle
+on the next sync.
+
+Files are named `<First author>[ et al.] <year> - <title>.pdf`, truncated to 120 characters. When
+two papers in one folder would get the same name, both get their Zotero attachment key appended.
+
+The Kindle lists documents as a flat list and ignores folders. The folders are real on the device
+and visible from a computer, but the Kindle's Home and Library screens do not show them. As an
+option, Settings can put the collection name in brackets at the front of each file name so that
+sorting by title groups papers by collection. This only helps for PDFs without an embedded title,
+because the Kindle prefers the embedded title over the file name.
 
 ## Status
 
-- The CLI path was tested end to end on a Kindle Scribe Colorsoft: 405 PDFs from 6 libraries,
-  1.5 GB, 1m40s over MTP. A deletion on the device propagated back correctly.
-- The plugin installs and starts in Zotero 10.0.2 beta. A full sync from inside Zotero has not
-  been confirmed yet.
-- Pulling Kindle annotations back into Zotero is not implemented.
+- Tested end to end on a Kindle Scribe Colorsoft with Zotero 10.0.2 beta: 406 PDFs from 6
+  libraries, about 1.5 GB, 1m40s for the first transfer over MTP, 2.5 minutes for a layout change.
+  Deletions on the device propagate back, and the background sync, the toolbar buttons, and the
+  s2k download all work from inside Zotero.
+- The current s2k release reports a failed folder listing as an empty folder. A driver fix that
+  aborts the sync instead, and skips the Kindle's `.sdr` sidecar folders while listing, is prepared
+  for sync2kindle. Until it ships, the plugin's preview guard is the protection.
+- Not implemented: writing the collection into the PDF title metadata, and pulling Kindle
+  annotations back into Zotero.
