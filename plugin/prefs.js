@@ -7,3 +7,5 @@ pref("extensions.zoterokindle.syncedTag", "on-kindle");
 pref("extensions.zoterokindle.ignoreDeviceRemovals", false);
 pref("extensions.zoterokindle.autoSync", true);
 pref("extensions.zoterokindle.autoSyncMinutes", "5");
+pref("extensions.zoterokindle.layout", "collections");
+pref("extensions.zoterokindle.allCollections", true);

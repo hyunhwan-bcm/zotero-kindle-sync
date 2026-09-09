@@ -3,7 +3,8 @@
  * Zotero Kindle Sync
  *
  * 1. Mirror: copy every stored PDF attachment of the selected libraries into
- *       <mirrorDir>/<Library>/<First author> <year> - <title>.pdf
+ *       <mirrorDir>/<Library>/<Collection>/<Subcollection>/<First author> <year> - <title>.pdf
+ *    (or <mirrorDir>/<Library>/<file> with the "library" layout)
  *    A manifest (../state/manifest.json next to the mirror) maps attachment keys to
  *    mirror paths so renames and removals can be followed.
  * 2. Sync: run `s2k -c <generated config> mtp` which pushes new PDFs to the Kindle and,
@@ -227,6 +228,58 @@ ZoteroKindle = {
     return lib.libraryType === "user" ? "Personal" : lib.name;
   },
 
+  /* "Parent/Child/Grandchild" for a Zotero collection */
+  collectionPath(coll) {
+    const parts = [];
+    for (let c = coll; c; c = c.parentID ? Zotero.Collections.get(c.parentID) : null) {
+      parts.unshift(this.sanitize(c.name) || c.key);
+    }
+    return parts.join("/");
+  },
+
+  /* mirror-relative paths (with "/") where this attachment belongs */
+  relPaths(att) {
+    const lib = this.sanitize(this.libraryName(att.libraryID));
+    const name = this.buildName(att);
+    if (this.pref("layout") !== "collections") return [`${lib}/${name}`];
+    const parent = att.parentItem || att;
+    let dirs = parent
+      .getCollections()
+      .map((id) => Zotero.Collections.get(id))
+      .filter(Boolean)
+      .map((c) => this.collectionPath(c))
+      .filter(Boolean)
+      .sort();
+    dirs = Array.from(new Set(dirs));
+    if (!dirs.length) dirs = ["Unfiled"];
+    if (!this.pref("allCollections")) dirs = dirs.slice(0, 1);
+    return dirs.map((d) => `${lib}/${d}/${name}`);
+  },
+
+  /* delete directories left empty after files were moved or removed */
+  async pruneEmptyDirs(dir, isRoot = true) {
+    let children;
+    try {
+      children = await IOUtils.getChildren(dir);
+    } catch (e) {
+      return false;
+    }
+    let remaining = 0;
+    for (const child of children) {
+      const st = await IOUtils.stat(child);
+      if (st.type === "directory") {
+        if (!(await this.pruneEmptyDirs(child, false))) remaining++;
+      } else if (PathUtils.filename(child) !== ".DS_Store") {
+        remaining++;
+      }
+    }
+    if (remaining === 0 && !isRoot) {
+      await IOUtils.remove(dir, { recursive: true });
+      return true;
+    }
+    return false;
+  },
+
   /* ---------------- s2k binary ---------------- */
 
   s2kBinaryName() {
@@ -416,27 +469,38 @@ ZoteroKindle = {
   /* ---------------- mirror ---------------- */
 
   async mirror(p, attachments, ui, { dryRun }) {
-    const manifest = await this.readJSON(p.manifest, {});
+    const raw = await this.readJSON(p.manifest, {});
+    // manifest: "<libraryID>/<attachmentKey>" -> [mirror-relative paths]; older files stored a single string
+    const manifest = {};
+    for (const [k, v] of Object.entries(raw)) manifest[k] = Array.isArray(v) ? v : [v];
     const removedTag = this.pref("removedTag");
     const syncedTag = this.pref("syncedTag");
+    const exists = (rel) => IOUtils.exists(this.absPath(p.mirrorDir, rel));
 
-    // 1. anything in the manifest that is gone from the mirror was deleted on the Kindle by the last sync
-    for (const [key, rel] of Object.entries(manifest)) {
-      if (await IOUtils.exists(this.absPath(p.mirrorDir, rel))) continue;
+    // 1. a copy missing from the mirror was deleted on the Kindle by the last sync:
+    //    tag the item and drop its other copies too, so the device loses them as well
+    for (const [key, rels] of Object.entries(manifest)) {
+      const missing = [];
+      for (const rel of rels) if (!(await exists(rel))) missing.push(rel);
+      if (!missing.length) continue;
       const [libraryID, attKey] = key.split("/");
       const att = Zotero.Items.getByLibraryAndKey(Number(libraryID), attKey);
       const target = att ? att.parentItem || att : null;
-      ui.line(`Removed on Kindle: ${rel}`);
+      ui.line(`Removed on Kindle: ${missing[0]}`);
       if (!dryRun) {
         await this.setTag(target, syncedTag, false);
         await this.setTag(target, removedTag, true);
+        for (const rel of rels) {
+          if (!missing.includes(rel)) await IOUtils.remove(this.absPath(p.mirrorDir, rel), { ignoreAbsent: true });
+        }
         delete manifest[key];
       }
     }
 
-    // 2. copy new / changed PDFs into the mirror
-    const used = new Set(Object.values(manifest).map((v) => v.toLowerCase()));
+    // 2. copy new / changed PDFs into the mirror, move copies whose folder changed
+    const used = new Set();
     let copied = 0,
+      moved = 0,
       kept = 0,
       skipped = 0;
     for (const att of attachments) {
@@ -448,35 +512,50 @@ ZoteroKindle = {
       const src = await att.getFilePathAsync();
       if (!src) continue;
       const key = `${att.libraryID}/${att.key}`;
-      let rel = manifest[key];
-      if (!rel) {
-        rel = `${this.sanitize(this.libraryName(att.libraryID))}/${this.buildName(att)}`;
-        if (used.has(rel.toLowerCase())) rel = rel.replace(/\.pdf$/, ` [${att.key}].pdf`);
+      const previous = manifest[key] || [];
+      const wanted = [];
+      for (let rel of this.relPaths(att)) {
+        if (used.has(rel.toLowerCase()) && !previous.includes(rel)) rel = rel.replace(/\.pdf$/, ` [${att.key}].pdf`);
+        used.add(rel.toLowerCase());
+        wanted.push(rel);
       }
-      used.add(rel.toLowerCase());
-      const dst = this.absPath(p.mirrorDir, rel);
-      let same = false;
-      if (await IOUtils.exists(dst)) {
-        const [a, b] = await Promise.all([IOUtils.stat(src), IOUtils.stat(dst)]);
-        same = a.size === b.size;
-      }
-      if (same) {
-        kept++;
-      } else {
-        copied++;
-        ui.line(`${dryRun ? "Would copy" : "Copy"}: ${rel}`);
-        if (!dryRun) {
-          await IOUtils.makeDirectory(PathUtils.parent(dst), { ignoreExisting: true });
-          await IOUtils.copy(src, dst);
+      const stale = previous.filter((rel) => !wanted.includes(rel));
+      const srcSize = (await IOUtils.stat(src)).size;
+      for (const rel of wanted) {
+        const dst = this.absPath(p.mirrorDir, rel);
+        if ((await IOUtils.exists(dst)) && (await IOUtils.stat(dst)).size === srcSize) {
+          kept++;
+          continue;
+        }
+        const from = stale.length ? stale.shift() : null;
+        if (from && (await exists(from))) {
+          moved++;
+          ui.line(`${dryRun ? "Would move" : "Move"}: ${from} -> ${rel}`);
+          if (!dryRun) {
+            await IOUtils.makeDirectory(PathUtils.parent(dst), { ignoreExisting: true });
+            await IOUtils.move(this.absPath(p.mirrorDir, from), dst);
+          }
+        } else {
+          copied++;
+          ui.line(`${dryRun ? "Would copy" : "Copy"}: ${rel}`);
+          if (!dryRun) {
+            await IOUtils.makeDirectory(PathUtils.parent(dst), { ignoreExisting: true });
+            await IOUtils.copy(src, dst);
+          }
         }
       }
-      manifest[key] = rel;
+      for (const rel of stale) {
+        ui.line(`${dryRun ? "Would remove" : "Remove"} extra copy: ${rel}`);
+        if (!dryRun) await IOUtils.remove(this.absPath(p.mirrorDir, rel), { ignoreAbsent: true });
+      }
+      manifest[key] = wanted;
     }
     if (!dryRun) {
+      await this.pruneEmptyDirs(p.mirrorDir);
       await IOUtils.makeDirectory(p.stateDir, { ignoreExisting: true });
       await IOUtils.writeJSON(p.manifest, manifest);
     }
-    return { manifest, copied, kept, skipped };
+    return { manifest, copied, moved, kept, skipped };
   },
 
   /* ---------------- run s2k ---------------- */
@@ -540,7 +619,7 @@ ZoteroKindle = {
       await this.writeConfig(p);
 
       const m = await this.mirror(p, attachments, ui, { dryRun });
-      ui.line(`Mirror: ${m.copied} copied, ${m.kept} unchanged, ${m.skipped} skipped (removed tag)`);
+      ui.line(`Mirror: ${m.copied} copied, ${m.moved} moved, ${m.kept} unchanged, ${m.skipped} skipped (removed tag)`);
 
       const r = await this.runS2K(p, ui, { dryRun });
       if (r.noDevice) {
@@ -560,9 +639,12 @@ ZoteroKindle = {
         // everything still in the mirror after the sync is on the device
         const syncedTag = this.pref("syncedTag");
         for (const att of attachments) {
-          const rel = m.manifest[`${att.libraryID}/${att.key}`];
-          if (rel && (await IOUtils.exists(this.absPath(p.mirrorDir, rel)))) {
-            await this.setTag(att.parentItem || att, syncedTag, true);
+          const rels = m.manifest[`${att.libraryID}/${att.key}`] || [];
+          for (const rel of rels) {
+            if (await IOUtils.exists(this.absPath(p.mirrorDir, rel))) {
+              await this.setTag(att.parentItem || att, syncedTag, true);
+              break;
+            }
           }
         }
       }

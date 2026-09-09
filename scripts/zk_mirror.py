@@ -2,7 +2,11 @@
 """
 Mirror Zotero PDF attachments into a Kindle-friendly folder tree.
 
-    <mirror>/<Library name>/<First author> <year> - <title>.pdf
+    <mirror>/<Library name>/<Collection>/<Subcollection>/<First author> <year> - <title>.pdf
+
+or, with --layout library, <mirror>/<Library name>/<file>. Papers in no collection go to
+"Unfiled"; a paper in several collections is copied into each unless --one-collection is given.
+The manifest maps each attachment to the list of mirror paths holding it.
 
 The mirror is what sync2kindle (s2k) syncs to the device, so Zotero's own
 storage is never touched by the bidirectional sync. When a PDF disappears
@@ -40,6 +44,8 @@ def snapshot_db(data_dir: Path) -> Path:
 
 QUERY = """
 select
+  i.itemID                       as attItemID,
+  p.itemID                       as parentItemID,
   i.libraryID,
   l.type                         as libType,
   coalesce(g.name, 'Personal')   as libName,
@@ -68,6 +74,36 @@ order by libName, firstAuthor, date
 """
 
 
+COLLECTIONS_QUERY = """
+select c.collectionID, c.collectionName, c.parentCollectionID, c.libraryID from collections c
+"""
+ITEM_COLLECTIONS_QUERY = """
+select ci.itemID, ci.collectionID from collectionItems ci
+"""
+
+
+def load_collections(con):
+    """Return {itemID: [collection path, ...]} using sanitized names joined with '/'."""
+    cols = {r["collectionID"]: r for r in con.execute(COLLECTIONS_QUERY)}
+    cache = {}
+
+    def path(cid):
+        if cid in cache:
+            return cache[cid]
+        parts, cur, seen = [], cid, set()
+        while cur and cur in cols and cur not in seen:
+            seen.add(cur)
+            parts.append(sanitize(cols[cur]["collectionName"]) or str(cur))
+            cur = cols[cur]["parentCollectionID"]
+        cache[cid] = "/".join(reversed(parts))
+        return cache[cid]
+
+    by_item = {}
+    for r in con.execute(ITEM_COLLECTIONS_QUERY):
+        by_item.setdefault(r["itemID"], []).append(path(r["collectionID"]))
+    return by_item
+
+
 def build_name(row) -> str:
     title = row["title"] or row["attTitle"] or row["attKey"]
     year = ""
@@ -93,30 +129,41 @@ def main():
     ap.add_argument("--library", action="append", help="only these library names (repeatable)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--prune", action="store_true", help="delete mirror files that are no longer in Zotero")
+    ap.add_argument("--layout", choices=["collections", "library"], default="collections",
+                    help="folder tree per Zotero collection (default) or one folder per library")
+    ap.add_argument("--one-collection", action="store_true",
+                    help="copy a paper into its first collection only instead of every collection")
     args = ap.parse_args()
 
     args.state.mkdir(parents=True, exist_ok=True)
     manifest_path = args.state / "manifest.json"
     removed_path = args.state / "removed.json"
-    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    raw = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    manifest = {k: (v if isinstance(v, list) else [v]) for k, v in raw.items()}
     removed = json.loads(removed_path.read_text()) if removed_path.exists() else {}
 
-    # 1. Detect files that s2k removed from the mirror since last run (deleted on Kindle).
-    for key, rel in list(manifest.items()):
-        if not (args.mirror / rel).exists() and key not in removed:
-            removed[key] = rel
-            print(f"removed on device -> will not re-mirror: {rel}")
+    # 1. Detect copies that s2k removed from the mirror since last run (deleted on Kindle).
+    #    The item is retired and its other copies are dropped too, so the device loses them as well.
+    for key, rels in list(manifest.items()):
+        missing = [r for r in rels if not (args.mirror / r).exists()]
+        if missing and key not in removed:
+            removed[key] = missing[0]
+            print(f"removed on device -> will not re-mirror: {missing[0]}")
+            for r in rels:
+                if r not in missing and not args.dry_run:
+                    (args.mirror / r).unlink(missing_ok=True)
             del manifest[key]
 
     db = snapshot_db(args.data_dir)
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     rows = con.execute(QUERY).fetchall()
+    item_collections = load_collections(con) if args.layout == "collections" else {}
     con.close()
     shutil.rmtree(db.parent, ignore_errors=True)
 
     used, new_manifest = set(), {}
-    stats = dict(copied=0, kept=0, skipped_removed=0, missing=0)
+    stats = dict(copied=0, moved=0, kept=0, skipped_removed=0, missing=0)
     for r in rows:
         if args.library and r["libName"] not in args.library:
             continue
@@ -130,33 +177,72 @@ def main():
         if not src.exists():
             stats["missing"] += 1
             continue
-        rel = Path(sanitize(r["libName"])) / build_name(r)
-        # de-duplicate identical names (same paper in two items, multiple PDFs per item)
-        if str(rel).lower() in used:
-            rel = rel.with_name(f"{rel.stem} [{r['attKey']}].pdf")
-        used.add(str(rel).lower())
-        new_manifest[key] = str(rel)
-        dst = args.mirror / rel
-        if dst.exists() and dst.stat().st_size == src.stat().st_size:
-            stats["kept"] += 1
-            continue
-        stats["copied"] += 1
-        print(f"{'would copy' if args.dry_run else 'copy'}: {rel}")
-        if not args.dry_run:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
+        lib = sanitize(r["libName"])
+        name = build_name(r)
+        if args.layout == "collections":
+            dirs = sorted(set(item_collections.get(r["parentItemID"] or r["attItemID"], []))) or ["Unfiled"]
+            if args.one_collection:
+                dirs = dirs[:1]
+            wanted = [f"{lib}/{d}/{name}" for d in dirs]
+        else:
+            wanted = [f"{lib}/{name}"]
+        previous = manifest.get(key, [])
+        rels = []
+        for rel in wanted:
+            # de-duplicate identical names (same paper in two items, multiple PDFs per item)
+            if rel.lower() in used and rel not in previous:
+                rel = rel[:-4] + f" [{r['attKey']}].pdf"
+            used.add(rel.lower())
+            rels.append(rel)
+        stale = [x for x in previous if x not in rels]
+        for rel in rels:
+            dst = args.mirror / rel
+            if dst.exists() and dst.stat().st_size == src.stat().st_size:
+                stats["kept"] += 1
+                continue
+            old = None
+            while stale and old is None:
+                cand = stale.pop(0)
+                if (args.mirror / cand).exists():
+                    old = cand
+            if old:
+                stats["moved"] += 1
+                print(f"{'would move' if args.dry_run else 'move'}: {old} -> {rel}")
+                if not args.dry_run:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    (args.mirror / old).rename(dst)
+            else:
+                stats["copied"] += 1
+                print(f"{'would copy' if args.dry_run else 'copy'}: {rel}")
+                if not args.dry_run:
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dst)
+        for rel in stale:
+            print(f"{'would remove' if args.dry_run else 'remove'} extra copy: {rel}")
+            if not args.dry_run:
+                (args.mirror / rel).unlink(missing_ok=True)
+        new_manifest[key] = rels
 
     if args.prune:
-        for key, rel in manifest.items():
-            if key not in new_manifest and (args.mirror / rel).exists():
-                print(f"{'would prune' if args.dry_run else 'prune'} (gone from Zotero): {rel}")
-                if not args.dry_run:
-                    (args.mirror / rel).unlink()
+        for key, rels in manifest.items():
+            if key in new_manifest:
+                continue
+            for rel in rels:
+                if (args.mirror / rel).exists():
+                    print(f"{'would prune' if args.dry_run else 'prune'} (gone from Zotero): {rel}")
+                    if not args.dry_run:
+                        (args.mirror / rel).unlink()
+
+    if not args.dry_run:
+        # drop directories left empty by moves
+        for d in sorted((x for x in args.mirror.rglob("*") if x.is_dir()), key=lambda x: -len(x.parts)):
+            if not any(f.name != ".DS_Store" for f in d.iterdir()):
+                shutil.rmtree(d)
 
     if not args.dry_run:
         manifest_path.write_text(json.dumps(new_manifest, indent=1, ensure_ascii=False))
         removed_path.write_text(json.dumps(removed, indent=1, ensure_ascii=False))
-    print(f"\n{len(new_manifest)} PDFs in mirror: {stats}")
+    print(f"\n{len(new_manifest)} PDFs, {sum(len(v) for v in new_manifest.values())} copies in mirror: {stats}")
 
 
 if __name__ == "__main__":

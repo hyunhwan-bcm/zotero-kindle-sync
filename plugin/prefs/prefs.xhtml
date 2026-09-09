@@ -33,6 +33,17 @@
     <checkbox label="Ignore deletions made on the Kindle (one-way sync)" preference="extensions.zoterokindle.ignoreDeviceRemovals"/>
   </groupbox>
   <groupbox>
+    <label><html:h2>Folders on the Kindle</html:h2></label>
+    <radiogroup id="zk-layout" preference="extensions.zoterokindle.layout">
+      <radio value="collections" label="Mirror the Zotero collection tree (Library / Collection / Subcollection)"/>
+      <radio value="library" label="One folder per library"/>
+    </radiogroup>
+    <checkbox label="A paper in several collections is copied into each of them" preference="extensions.zoterokindle.allCollections"/>
+    <description style="opacity: .7">
+      Papers in no collection go to an "Unfiled" folder. Changing the layout moves every paper on the Kindle on the next sync.
+    </description>
+  </groupbox>
+  <groupbox>
     <label><html:h2>Background sync</html:h2></label>
     <checkbox label="Sync automatically while Zotero is running" preference="extensions.zoterokindle.autoSync"/>
     <hbox align="center">

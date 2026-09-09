@@ -4,7 +4,7 @@ Keeps a Kindle in sync with your Zotero libraries in both directions. The device
 by [sync2kindle](https://github.com/rupor-github/sync2kindle) (`s2k`).
 
 ```
-Zotero storage  --copy-->  mirror/<Library>/<Author Year - Title>.pdf  --s2k mtp-->  Kindle documents/zotero
+Zotero storage  --copy-->  mirror/<Library>/<Collection>/<Author Year - Title>.pdf  --s2k mtp-->  Kindle documents/zotero
 Zotero tags     <--------  manifest / removed state                    <--s2k mtp--  deleted on Kindle
 ```
 
@@ -78,9 +78,13 @@ The plugin writes two tags back to Zotero: `on-kindle` while a PDF is on the dev
 `kindle-removed` after it was deleted on the Kindle. An item with the removed tag is skipped until
 you delete the tag.
 
-Files are named `<First author>[ et al.] <year> - <title>.pdf`, truncated to 120 characters,
-inside a folder per library (`Personal`, or the group name). Duplicate names get the attachment
-key appended.
+Files are named `<First author>[ et al.] <year> - <title>.pdf`, truncated to 120 characters.
+Folders follow the Zotero collection tree inside a folder per library (`Personal`, or the group
+name): `Personal/01_AI/Sub/…`. Papers in no collection go to `Unfiled`. A paper in several
+collections is copied into each of them unless you turn that off in Settings (CLI: `--one-collection`).
+The alternative layout is one folder per library (Settings, or CLI `--layout library`). Changing the
+layout moves every paper on the Kindle on the next sync. Duplicate names get the attachment key
+appended.
 
 ## Status
 
