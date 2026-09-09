@@ -65,18 +65,25 @@ ZoteroKindle = {
       toolsPopup.append(sep, sync, dry);
     }
 
-    // toolbar button in the items pane, next to "New Note"
+    // toolbar buttons in the items pane, after "New Note"; same 20px context-fill icons Zotero uses
     const anchor = doc.getElementById("zotero-tb-note-add");
     if (anchor && !doc.getElementById("zk-tb-sync")) {
-      const btn = doc.createXULElement("toolbarbutton");
-      btn.id = "zk-tb-sync";
-      btn.className = "zotero-tb-button";
-      btn.setAttribute("tabindex", "-1");
-      btn.setAttribute("tooltiptext", "Sync library to Kindle (Shift-click: preview only)");
-      btn.setAttribute("image", this.rootURI + "toolbar-icon.svg");
-      btn.style.cssText = "-moz-context-properties: fill, fill-opacity; fill: currentColor;";
-      btn.addEventListener("command", (ev) => this.syncAll(win, { dryRun: ev.shiftKey }));
-      anchor.insertAdjacentElement("afterend", btn);
+      const make = (id, icon, tip, dryRun) => {
+        const btn = doc.createXULElement("toolbarbutton");
+        btn.id = id;
+        btn.className = "zotero-tb-button";
+        btn.setAttribute("tabindex", "-1");
+        btn.setAttribute("tooltiptext", tip);
+        btn.style.cssText =
+          `list-style-image: url("${this.rootURI}icons/${icon}.svg"); ` +
+          "-moz-context-properties: fill, fill-opacity; fill: currentColor;";
+        btn.addEventListener("command", () => this.syncAll(win, { dryRun }));
+        return btn;
+      };
+      const dry = make("zk-tb-dry", "kindle-preview", "Preview Kindle sync (dry run, changes nothing)", true);
+      const sync = make("zk-tb-sync", "kindle-sync", "Sync library to Kindle", false);
+      anchor.insertAdjacentElement("afterend", sync);
+      anchor.insertAdjacentElement("afterend", dry);
     }
 
     const itemMenu = doc.getElementById("zotero-itemmenu");
@@ -91,7 +98,7 @@ ZoteroKindle = {
   },
 
   removeFromWindow(win) {
-    for (const id of ["zk-menu-sep", "zk-menu-sync", "zk-menu-dry", "zk-item-send", "zk-tb-sync"]) {
+    for (const id of ["zk-menu-sep", "zk-menu-sync", "zk-menu-dry", "zk-item-send", "zk-tb-sync", "zk-tb-dry"]) {
       win.document.getElementById(id)?.remove();
     }
     this.windows.delete(win);

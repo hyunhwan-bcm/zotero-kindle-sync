@@ -63,7 +63,7 @@ copying the `.xpi` into `extensions/` by hand installs it *disabled* until enabl
 Then in Settings → Kindle Sync set the path to `s2k` and the mirror folder (e.g. this repo's
 `mirror/`). The plugin adds:
 
-- a **Kindle button** in the items toolbar (next to New Note). Click to sync, Shift-click for a dry run
+- two **Kindle buttons** in the items toolbar (next to New Note): preview (dry run) and sync
 - **Tools → Sync Library to Kindle** and **Preview Kindle Sync (dry run)**
 - **Send to Kindle** in the item context menu (selected items or their PDFs only)
 
