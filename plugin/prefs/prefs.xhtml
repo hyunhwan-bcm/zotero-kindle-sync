@@ -6,7 +6,11 @@
       <label value="Path to s2k binary" style="width: 170px"/>
       <html:input type="text" style="flex: 1" preference="extensions.zoterokindle.s2kPath"/>
       <button id="zk-pick-s2k" label="Browse…"/>
+      <button id="zk-install-s2k" label="Download latest"/>
     </hbox>
+    <description style="opacity: .7">
+      Leave the path empty to have the plugin download s2k from the sync2kindle releases on first use. macOS also needs libmtp (brew install libmtp).
+    </description>
     <hbox align="center">
       <label value="Mirror folder" style="width: 170px"/>
       <html:input type="text" style="flex: 1" preference="extensions.zoterokindle.mirrorDir"/>
@@ -27,6 +31,17 @@
       <html:input type="text" style="flex: 1" preference="extensions.zoterokindle.libraries"/>
     </hbox>
     <checkbox label="Ignore deletions made on the Kindle (one-way sync)" preference="extensions.zoterokindle.ignoreDeviceRemovals"/>
+  </groupbox>
+  <groupbox>
+    <label><html:h2>Background sync</html:h2></label>
+    <checkbox label="Sync automatically while Zotero is running" preference="extensions.zoterokindle.autoSync"/>
+    <hbox align="center">
+      <label value="Check for the Kindle every (minutes)" style="width: 260px"/>
+      <html:input type="number" min="1" max="720" style="width: 6em" preference="extensions.zoterokindle.autoSyncMinutes"/>
+    </hbox>
+    <description style="opacity: .7">
+      Nothing is shown while no Kindle is connected. When a connected Kindle receives or loses papers, a short summary pops up.
+    </description>
   </groupbox>
   <groupbox>
     <label><html:h2>Tags written back to Zotero</html:h2></label>

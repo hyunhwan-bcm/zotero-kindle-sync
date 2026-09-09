@@ -26,8 +26,10 @@ The CLI and the plugin share `state/manifest.json` and the `s2k` history, so you
 
 ## Requirements
 
-- A full `s2k` build with MTP support for your platform. On macOS: `brew install libmtp`, then build
-  sync2kindle with `CGO_ENABLED=1 go build -tags 'mtp usb' -o build/s2k ./cmd/s2k`.
+- `s2k`, the sync2kindle binary with MTP support. The plugin downloads the matching build from the
+  sync2kindle releases on first use and keeps it in the Zotero profile folder. For the CLI, download
+  an `s2k-*` archive yourself or build sync2kindle with `CGO_ENABLED=1 go build -tags 'mtp usb' -o build/s2k ./cmd/s2k`.
+- On macOS, libmtp: `brew install libmtp`. The s2k build loads it from Homebrew.
 - A newer Kindle (Scribe, Colorsoft, Paperwhite 12) connected over USB. Do not run the standalone
   `mtp-*` tools from libmtp on macOS while the Kindle is attached. They release the device on exit
   and the Kindle drops off USB until you replug it.
@@ -61,12 +63,16 @@ Zotero's loader (Zotero 7+) rejects a plugin whose manifest lacks `applications.
 into the profile's `extensions/` folder. An `.xpi` copied there by hand is installed disabled until
 you enable it in the Plugins window, so installing through that window is simpler.
 
-In Settings > Kindle Sync, set the path to `s2k` and the mirror folder (for example this repo's
-`mirror/`). The plugin adds:
+The plugin works without configuration: the mirror goes to `kindle-sync/mirror` inside the Zotero
+data directory and s2k is downloaded on first use. Settings > Kindle Sync lets you change the s2k
+path, the mirror folder, the libraries, the tags, and the background sync. The plugin adds:
 
 - two Kindle buttons in the items toolbar, next to New Note: preview (dry run) and sync
 - Tools > Sync Library to Kindle, and Tools > Preview Kindle Sync (dry run)
 - Send to Kindle in the item context menu, for the selected items or their PDFs only
+- background sync: every 5 minutes (configurable) the plugin refreshes the mirror and probes for the
+  Kindle. Nothing is shown while no Kindle is connected. When a connected Kindle receives or loses
+  papers, a short summary pops up. Turn it off in Settings or with Tools > Auto-sync to Kindle.
 
 The plugin writes two tags back to Zotero: `on-kindle` while a PDF is on the device, and
 `kindle-removed` after it was deleted on the Kindle. An item with the removed tag is skipped until

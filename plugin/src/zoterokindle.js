@@ -1,16 +1,19 @@
-/* global Zotero, Services, ChromeUtils, IOUtils, PathUtils */
+/* global Zotero, Services, Components, ChromeUtils, IOUtils, PathUtils */
 /*
  * Zotero Kindle Sync
  *
  * 1. Mirror: copy every stored PDF attachment of the selected libraries into
  *       <mirrorDir>/<Library>/<First author> <year> - <title>.pdf
- *    A manifest (state/manifest.json next to the mirror) maps attachment keys to
+ *    A manifest (../state/manifest.json next to the mirror) maps attachment keys to
  *    mirror paths so renames and removals can be followed.
  * 2. Sync: run `s2k -c <generated config> mtp` which pushes new PDFs to the Kindle and,
  *    for PDFs deleted on the Kindle, deletes the mirror copy (never Zotero's own file).
+ *    s2k is downloaded from the sync2kindle GitHub releases on first use.
  * 3. Write back: parent items whose PDF is on the device get the "synced" tag; items whose
  *    PDF vanished from the mirror after the sync get the "removed" tag and are not mirrored
  *    again until that tag is removed.
+ * 4. Background: a timer runs the whole cycle quietly every few minutes. When no Kindle is
+ *    connected nothing is shown; when something was transferred a summary pops up.
  */
 ZoteroKindle = {
   id: null,
@@ -21,11 +24,32 @@ ZoteroKindle = {
 
   PREF: "extensions.zoterokindle.",
   MAX_NAME: 120,
+  S2K_REPO: "rupor-github/sync2kindle",
+  S2K_BUILDS: ["darwin-arm64", "darwin-amd64", "linux-amd64", "windows-amd64"],
+
+  timer: null,
+  firstTimer: null,
+  timerWin: null,
+  lastAutoError: null,
+  prefObservers: [],
 
   init({ id, version, rootURI }) {
     this.id = id;
     this.version = version;
     this.rootURI = rootURI;
+    Zotero.ZoteroKindle = this; // reachable from the preference pane
+    for (const name of ["autoSync", "autoSyncMinutes"]) {
+      this.prefObservers.push(
+        Zotero.Prefs.registerObserver(this.PREF + name, () => this.restartScheduler(), true)
+      );
+    }
+  },
+
+  shutdown() {
+    this.stopScheduler();
+    for (const o of this.prefObservers) Zotero.Prefs.unregisterObserver(o);
+    this.prefObservers = [];
+    delete Zotero.ZoteroKindle;
   },
 
   log(msg) {
@@ -34,6 +58,10 @@ ZoteroKindle = {
 
   pref(name) {
     return Zotero.Prefs.get(this.PREF + name, true);
+  },
+
+  setPref(name, value) {
+    Zotero.Prefs.set(this.PREF + name, value, true);
   },
 
   /* ---------------- UI ---------------- */
@@ -62,7 +90,20 @@ ZoteroKindle = {
       dry.id = "zk-menu-dry";
       dry.setAttribute("label", "Preview Kindle Sync (dry run)");
       dry.addEventListener("command", () => this.syncAll(win, { dryRun: true }));
-      toolsPopup.append(sep, sync, dry);
+      const auto = doc.createXULElement("menuitem");
+      auto.id = "zk-menu-auto";
+      auto.setAttribute("type", "checkbox");
+      auto.setAttribute("label", "Auto-sync to Kindle in the background");
+      auto.setAttribute("checked", this.pref("autoSync") ? "true" : "false");
+      auto.addEventListener("command", () => {
+        const on = !this.pref("autoSync");
+        this.setPref("autoSync", on);
+        auto.setAttribute("checked", on ? "true" : "false");
+      });
+      toolsPopup.append(sep, sync, dry, auto);
+      toolsPopup.addEventListener("popupshowing", () => {
+        auto.setAttribute("checked", this.pref("autoSync") ? "true" : "false");
+      });
     }
 
     // toolbar buttons in the items pane, after "New Note"; same 20px context-fill icons Zotero uses
@@ -95,21 +136,29 @@ ZoteroKindle = {
       itemMenu.appendChild(send);
     }
     this.windows.add(win);
+    if (!this.timerWin) this.startScheduler(win);
   },
 
   removeFromWindow(win) {
-    for (const id of ["zk-menu-sep", "zk-menu-sync", "zk-menu-dry", "zk-item-send", "zk-tb-sync", "zk-tb-dry"]) {
+    for (const id of ["zk-menu-sep", "zk-menu-sync", "zk-menu-dry", "zk-menu-auto", "zk-item-send", "zk-tb-sync", "zk-tb-dry"]) {
       win.document.getElementById(id)?.remove();
     }
     this.windows.delete(win);
+    if (this.timerWin === win) {
+      this.stopScheduler();
+      const other = Array.from(this.windows)[0];
+      if (other) this.startScheduler(other);
+    }
   },
 
+  /* visible progress window, used for user-triggered runs */
   progress(win, title) {
     const pw = new Zotero.ProgressWindow({ closeOnClick: true });
     pw.changeHeadline(title);
     pw.addDescription("Starting…");
     pw.show();
     return {
+      quiet: false,
       line(text) {
         pw.addDescription(text);
       },
@@ -117,6 +166,29 @@ ZoteroKindle = {
         pw.addDescription(text);
         pw.startCloseTimer(ms);
       },
+      discard() {
+        pw.close();
+      },
+    };
+  },
+
+  /* buffered progress for background runs: only shown when something happened */
+  buffered(win, title) {
+    const lines = [];
+    return {
+      quiet: true,
+      line(text) {
+        lines.push(text);
+      },
+      done(text, ms = 10000) {
+        const pw = new Zotero.ProgressWindow({ closeOnClick: true });
+        pw.changeHeadline(title);
+        for (const l of lines.slice(-10)) pw.addDescription(l);
+        pw.addDescription(text);
+        pw.show();
+        pw.startCloseTimer(ms);
+      },
+      discard() {},
     };
   },
 
@@ -155,17 +227,97 @@ ZoteroKindle = {
     return lib.libraryType === "user" ? "Personal" : lib.name;
   },
 
+  /* ---------------- s2k binary ---------------- */
+
+  s2kBinaryName() {
+    return Zotero.isWin ? "s2k.exe" : "s2k";
+  },
+
+  s2kInstallDir() {
+    return PathUtils.join(Zotero.Profile.dir, "zotero-kindle-sync", "s2k");
+  },
+
+  s2kAssetName() {
+    const os = Zotero.isMac ? "darwin" : Zotero.isWin ? "windows" : Zotero.isLinux ? "linux" : "unknown";
+    const raw = Services.sysinfo.getProperty("arch");
+    const arch = raw === "aarch64" ? "arm64" : raw === "x86-64" ? "amd64" : raw;
+    const key = `${os}-${arch}`;
+    if (!this.S2K_BUILDS.includes(key)) {
+      throw new Error(
+        `sync2kindle has no MTP build for ${key}. Install s2k yourself and set its path in Settings → Kindle Sync.`
+      );
+    }
+    return `s2k-${key}.zip`;
+  },
+
+  /* returns a usable s2k path, downloading the latest release if needed */
+  async ensureS2K(ui, { force = false } = {}) {
+    const configured = this.pref("s2kPath");
+    if (!force && configured && (await IOUtils.exists(configured))) return configured;
+
+    const dir = this.s2kInstallDir();
+    const bin = PathUtils.join(dir, this.s2kBinaryName());
+    if (!force && (await IOUtils.exists(bin))) {
+      this.setPref("s2kPath", bin);
+      return bin;
+    }
+
+    const asset = this.s2kAssetName();
+    const url = `https://github.com/${this.S2K_REPO}/releases/latest/download/${asset}`;
+    ui.line(`Downloading ${asset} from sync2kindle releases…`);
+    this.log(`downloading ${url}`);
+    await IOUtils.makeDirectory(dir, { ignoreExisting: true });
+    const zipPath = PathUtils.join(Zotero.getTempDirectory().path, asset);
+    await Zotero.HTTP.download(url, zipPath);
+
+    const zr = Components.classes["@mozilla.org/libjar/zip-reader;1"].createInstance(
+      Components.interfaces.nsIZipReader
+    );
+    zr.open(Zotero.File.pathToFile(zipPath));
+    let found = false;
+    try {
+      const entries = zr.findEntries("*");
+      while (entries.hasMore()) {
+        const entry = entries.getNext();
+        if (entry.endsWith("/")) continue;
+        const dest = PathUtils.join(dir, ...entry.split("/"));
+        await IOUtils.makeDirectory(PathUtils.parent(dest), { ignoreExisting: true });
+        zr.extract(entry, Zotero.File.pathToFile(dest));
+        if (PathUtils.filename(dest) === this.s2kBinaryName()) found = true;
+      }
+    } finally {
+      zr.close();
+      await IOUtils.remove(zipPath, { ignoreAbsent: true });
+    }
+    if (!found) throw new Error(`${asset} did not contain ${this.s2kBinaryName()}`);
+    if (!Zotero.isWin) await IOUtils.setPermissions(bin, 0o755);
+    this.setPref("s2kPath", bin);
+    ui.line(`Installed s2k to ${bin}`);
+    return bin;
+  },
+
+  /* the macOS s2k builds load libmtp from Homebrew */
+  async checkLibmtp() {
+    if (!Zotero.isMac) return;
+    for (const p of ["/opt/homebrew/opt/libmtp/lib/libmtp.9.dylib", "/usr/local/opt/libmtp/lib/libmtp.9.dylib"]) {
+      if (await IOUtils.exists(p)) return;
+    }
+    throw new Error("libmtp is not installed. Run:  brew install libmtp  and sync again.");
+  },
+
   /* ---------------- paths & state ---------------- */
 
-  paths() {
-    const mirrorDir = this.pref("mirrorDir");
-    const s2kPath = this.pref("s2kPath");
-    if (!mirrorDir || !s2kPath) {
-      throw new Error("Set the s2k binary and the mirror folder in Settings → Kindle Sync first.");
+  async paths(ui) {
+    let mirrorDir = this.pref("mirrorDir");
+    if (!mirrorDir) {
+      mirrorDir = PathUtils.join(Zotero.DataDirectory.dir, "kindle-sync", "mirror");
+      this.setPref("mirrorDir", mirrorDir);
     }
     // state/ next to the mirror - same layout as scripts/zk_mirror.py and s2k-zotero.yaml,
     // so the CLI and the plugin share one manifest and one s2k history
     const stateDir = PathUtils.join(PathUtils.parent(mirrorDir), "state");
+    const s2kPath = await this.ensureS2K(ui);
+    await this.checkLibmtp();
     return {
       mirrorDir,
       s2kPath,
@@ -191,7 +343,7 @@ ZoteroKindle = {
     }
   },
 
-  async writeConfig(p, opts) {
+  async writeConfig(p) {
     const yaml = [
       "# generated by Zotero Kindle Sync - edit preferences in Zotero instead",
       `source: ${JSON.stringify(p.mirrorDir)}`,
@@ -224,6 +376,12 @@ ZoteroKindle = {
     return items.filter(
       (it) => it.isPDFAttachment() && it.isImportedAttachment() && !it.deleted && !(it.parentItem && it.parentItem.deleted)
     );
+  },
+
+  async collectAll() {
+    const out = [];
+    for (const lib of this.wantedLibraries()) out.push(...(await this.pdfAttachmentsIn(lib.libraryID)));
+    return out;
   },
 
   /* attachments for the current selection (parent items expand to their PDFs) */
@@ -330,33 +488,35 @@ ZoteroKindle = {
     this.log(`exec ${p.s2kPath} ${args.join(" ")}`);
 
     const { Subprocess } = ChromeUtils.importESModule("resource://gre/modules/Subprocess.sys.mjs");
-    const proc = await Subprocess.call({
-      command: p.s2kPath,
-      arguments: args,
-      stderr: "stdout",
-    });
+    const proc = await Subprocess.call({ command: p.s2kPath, arguments: args, stderr: "stdout" });
     let out = "";
     let chunk;
-    while ((chunk = await proc.stdout.readString())) {
-      out += chunk;
-      for (const line of chunk.split("\n")) {
-        const m = line.match(/"action":\s*"(\w+)".*?"(?:file|directory)":\s*"([^"]+)"/);
-        if (m) ui.line(`${m[1]} ${m[2]}`);
-        else if (/Nothing to do/.test(line)) ui.line("Device already up to date");
-        else if (/ERROR/.test(line)) ui.line(line.replace(/^\S+\s+ERROR\s+\S+\s+/, ""));
+    while ((chunk = await proc.stdout.readString())) out += chunk;
+    const { exitCode } = await proc.wait();
+
+    const result = { exitCode, out, actions: 0, noDevice: false, noBooks: false, nothing: false, error: null };
+    for (const line of out.split("\n")) {
+      const m = line.match(/"action":\s*"(\w+)".*?"(?:file|directory)":\s*"([^"]+)"/);
+      if (m) {
+        result.actions++;
+        ui.line(`${dryRun ? "Would " : ""}${m[1]} ${m[2]}`);
+      } else if (/Nothing to do/.test(line)) {
+        result.nothing = true;
+      } else if (/no available device found|unable to connect to device/.test(line)) {
+        result.noDevice = true;
+      } else if (/no books in the source path/.test(line)) {
+        result.noBooks = true;
+      } else if (/\tERROR\t/.test(line)) {
+        result.error = line.replace(/^.*\tERROR\t\S+\t/, "");
       }
     }
-    const { exitCode } = await proc.wait();
-    return { exitCode, out };
+    return result;
   },
 
   /* ---------------- entry points ---------------- */
 
   async syncAll(win, opts = {}) {
-    const libs = this.wantedLibraries();
-    const attachments = [];
-    for (const lib of libs) attachments.push(...(await this.pdfAttachmentsIn(lib.libraryID)));
-    return this.run(win, attachments, opts);
+    return this.run(win, await this.collectAll(), opts);
   },
 
   async syncSelected(win) {
@@ -365,12 +525,16 @@ ZoteroKindle = {
     return this.run(win, attachments);
   },
 
-  async run(win, attachments, { dryRun = false } = {}) {
-    if (this.running) return this.alert(win, "A Kindle sync is already running.");
+  async run(win, attachments, { dryRun = false, quiet = false } = {}) {
+    if (this.running) {
+      if (!quiet) this.alert(win, "A Kindle sync is already running.");
+      return;
+    }
     this.running = true;
-    const ui = this.progress(win, dryRun ? "Kindle sync preview" : "Syncing to Kindle");
+    const title = quiet ? "Kindle auto-sync" : dryRun ? "Kindle sync preview" : "Syncing to Kindle";
+    const ui = quiet ? this.buffered(win, title) : this.progress(win, title);
     try {
-      const p = this.paths();
+      const p = await this.paths(ui);
       await IOUtils.makeDirectory(p.mirrorDir, { ignoreExisting: true });
       await IOUtils.makeDirectory(p.stateDir, { ignoreExisting: true });
       await this.writeConfig(p);
@@ -379,9 +543,17 @@ ZoteroKindle = {
       ui.line(`Mirror: ${m.copied} copied, ${m.kept} unchanged, ${m.skipped} skipped (removed tag)`);
 
       const r = await this.runS2K(p, ui, { dryRun });
+      if (r.noDevice) {
+        if (quiet) {
+          ui.discard(); // no Kindle plugged in: stay silent
+          return;
+        }
+        throw new Error("No Kindle connected. Plug it in over USB and try again.");
+      }
+      if (r.noBooks) throw new Error("The mirror folder has no PDFs to sync.");
       if (r.exitCode !== 0) {
         this.log(r.out);
-        throw new Error(`s2k exited with code ${r.exitCode}. Is the Kindle connected? See ${p.log}`);
+        throw new Error(r.error || `s2k exited with code ${r.exitCode}. See ${p.log}`);
       }
 
       if (!dryRun) {
@@ -394,12 +566,75 @@ ZoteroKindle = {
           }
         }
       }
-      ui.done(dryRun ? "Preview finished (nothing changed)" : "Kindle sync finished");
+      this.lastAutoError = null;
+      if (quiet && r.actions === 0) {
+        ui.discard(); // device present, already in sync: nothing to report
+        return;
+      }
+      const summary = r.actions
+        ? `${r.actions} change${r.actions === 1 ? "" : "s"} ${dryRun ? "pending" : "applied"} on the Kindle`
+        : "Kindle already up to date";
+      ui.done(dryRun ? `Preview finished: ${summary}` : summary);
     } catch (e) {
       this.log(e.message);
+      if (quiet && this.lastAutoError === e.message) return; // do not nag every tick with the same error
+      this.lastAutoError = e.message;
       ui.done(`Failed: ${e.message}`, 15000);
     } finally {
       this.running = false;
+    }
+  },
+
+  /* ---------------- background scheduler ---------------- */
+
+  intervalMs() {
+    const minutes = Math.max(1, Number(this.pref("autoSyncMinutes")) || 5);
+    return minutes * 60 * 1000;
+  },
+
+  startScheduler(win) {
+    this.stopScheduler();
+    this.timerWin = win;
+    this.timer = win.setInterval(() => this.autoTick(), this.intervalMs());
+    this.firstTimer = win.setTimeout(() => this.autoTick(), 45 * 1000);
+    this.log(`scheduler started, every ${this.intervalMs() / 60000} min`);
+  },
+
+  stopScheduler() {
+    if (this.timerWin) {
+      this.timerWin.clearInterval(this.timer);
+      this.timerWin.clearTimeout(this.firstTimer);
+    }
+    this.timer = this.firstTimer = this.timerWin = null;
+  },
+
+  restartScheduler() {
+    const win = this.timerWin || Array.from(this.windows)[0];
+    if (win) this.startScheduler(win);
+  },
+
+  async autoTick() {
+    if (!this.pref("autoSync") || this.running) return;
+    const win = this.timerWin || Zotero.getMainWindow();
+    if (!win) return;
+    try {
+      await this.run(win, await this.collectAll(), { quiet: true });
+    } catch (e) {
+      this.log(`auto-sync: ${e.message}`);
+    }
+  },
+
+  /* used by the preference pane */
+  async installS2KFromPrefs(win) {
+    const ui = this.progress(win, "Installing s2k");
+    try {
+      const bin = await this.ensureS2K(ui, { force: true });
+      await this.checkLibmtp();
+      ui.done(`Ready: ${bin}`);
+      return bin;
+    } catch (e) {
+      ui.done(`Failed: ${e.message}`, 15000);
+      return null;
     }
   },
 };

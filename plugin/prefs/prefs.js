@@ -13,6 +13,11 @@
   document.getElementById("zk-pick-s2k").addEventListener("command", () => {
     pick("extensions.zoterokindle.s2kPath", 0, "Select the s2k binary");
   });
+  document.getElementById("zk-install-s2k").addEventListener("command", async () => {
+    const bin = await Zotero.ZoteroKindle.installS2KFromPrefs(window);
+    const input = document.querySelector('[preference="extensions.zoterokindle.s2kPath"]');
+    if (bin && input) input.value = bin;
+  });
   document.getElementById("zk-pick-mirror").addEventListener("command", () => {
     pick("extensions.zoterokindle.mirrorDir", 2, "Select the mirror folder");
   });

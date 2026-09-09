@@ -25,5 +25,6 @@ function onMainWindowUnload({ window }) { ZoteroKindle.removeFromWindow(window);
 
 function shutdown() {
   ZoteroKindle.removeFromAllWindows();
+  ZoteroKindle.shutdown();
   ZoteroKindle = undefined;
 }
