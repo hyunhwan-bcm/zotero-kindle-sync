@@ -1,0 +1,16 @@
+{
+  "manifest_version": 2,
+  "name": "Zotero Kindle Sync",
+  "version": "0.1.0",
+  "description": "Mirror Zotero PDF attachments into a Kindle-friendly folder and sync them to a Kindle over MTP with sync2kindle (s2k). Books deleted on the Kindle are tagged back in Zotero.",
+  "author": "Hyun-Hwan Jeong",
+  "homepage_url": "https://github.com/hyunhwan-jeong/zotero-kindle-sync",
+  "icons": { "48": "icon.svg", "96": "icon.svg" },
+  "applications": {
+    "zotero": {
+      "id": "zotero-kindle-sync@hyunhwan-jeong.github.io",
+      "strict_min_version": "7.0",
+      "strict_max_version": "10.*"
+    }
+  }
+}

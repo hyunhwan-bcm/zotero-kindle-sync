@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""
+Mirror Zotero PDF attachments into a Kindle-friendly folder tree.
+
+    <mirror>/<Library name>/<First author> <year> - <title>.pdf
+
+The mirror is what sync2kindle (s2k) syncs to the device, so Zotero's own
+storage is never touched by the bidirectional sync. When a PDF disappears
+from the mirror (because s2k removed it after it was deleted on the Kindle),
+the Zotero item key is recorded in state/removed.json and is not mirrored
+again until it is removed from that file.
+
+Reads a *copy* of zotero.sqlite so it is safe while Zotero is running.
+"""
+import argparse, json, os, re, shutil, sqlite3, sys, tempfile, unicodedata
+from pathlib import Path
+
+DEFAULT_DATA_DIR = Path.home() / "Zotero"
+MAX_NAME = 120  # keep well under filesystem/MTP limits
+
+
+def sanitize(s: str) -> str:
+    s = unicodedata.normalize("NFC", s or "")
+    s = re.sub(r"<[^>]+>", "", s)               # strip html tags from titles
+    s = s.replace("/", "-").replace("\\", "-").replace(":", " -")
+    s = re.sub(r'[<>"|?*\x00-\x1f]', "", s)
+    s = re.sub(r"\s+", " ", s).strip(" .")
+    return s
+
+
+def snapshot_db(data_dir: Path) -> Path:
+    """Copy zotero.sqlite (+wal) to a temp dir so the live DB is never opened."""
+    tmp = Path(tempfile.mkdtemp(prefix="zk_"))
+    for name in ("zotero.sqlite", "zotero.sqlite-wal", "zotero.sqlite-shm"):
+        src = data_dir / name
+        if src.exists():
+            shutil.copy2(src, tmp / name)
+    return tmp / "zotero.sqlite"
+
+
+QUERY = """
+select
+  i.libraryID,
+  l.type                         as libType,
+  coalesce(g.name, 'Personal')   as libName,
+  i.key                          as attKey,
+  ia.path                        as attPath,
+  p.key                          as parentKey,
+  (select v.value from itemData d join itemDataValues v on v.valueID=d.valueID
+     where d.itemID=p.itemID and d.fieldID=(select fieldID from fields where fieldName='title')) as title,
+  (select v.value from itemData d join itemDataValues v on v.valueID=d.valueID
+     where d.itemID=p.itemID and d.fieldID=(select fieldID from fields where fieldName='date'))  as date,
+  (select c.lastName from itemCreators ic join creators c on c.creatorID=ic.creatorID
+     where ic.itemID=p.itemID order by ic.orderIndex limit 1) as firstAuthor,
+  (select count(*) from itemCreators ic where ic.itemID=p.itemID) as nAuthors,
+  (select v.value from itemData d join itemDataValues v on v.valueID=d.valueID
+     where d.itemID=ia.itemID and d.fieldID=(select fieldID from fields where fieldName='title')) as attTitle
+from itemAttachments ia
+join items i on i.itemID = ia.itemID
+join libraries l on l.libraryID = i.libraryID
+left join groups g on g.libraryID = i.libraryID
+left join items p on p.itemID = ia.parentItemID
+where ia.contentType = 'application/pdf'
+  and ia.linkMode in (0, 1)                       -- imported file / imported url (stored in storage/<key>/)
+  and i.itemID not in (select itemID from deletedItems)
+  and (p.itemID is null or p.itemID not in (select itemID from deletedItems))
+order by libName, firstAuthor, date
+"""
+
+
+def build_name(row) -> str:
+    title = row["title"] or row["attTitle"] or row["attKey"]
+    year = ""
+    if row["date"]:
+        m = re.search(r"\d{4}", row["date"])
+        year = m.group(0) if m else ""
+    author = row["firstAuthor"] or ""
+    if author and (row["nAuthors"] or 0) > 1:
+        author += " et al."
+    head = " ".join(x for x in (author, year) if x)
+    name = f"{head} - {title}" if head else title
+    name = sanitize(name)
+    if len(name) > MAX_NAME:
+        name = name[:MAX_NAME].rstrip(" .-")
+    return name + ".pdf"
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR, help="Zotero data directory")
+    ap.add_argument("--mirror", type=Path, required=True, help="output folder that s2k syncs from")
+    ap.add_argument("--state", type=Path, required=True, help="folder for manifest.json / removed.json")
+    ap.add_argument("--library", action="append", help="only these library names (repeatable)")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--prune", action="store_true", help="delete mirror files that are no longer in Zotero")
+    args = ap.parse_args()
+
+    args.state.mkdir(parents=True, exist_ok=True)
+    manifest_path = args.state / "manifest.json"
+    removed_path = args.state / "removed.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    removed = json.loads(removed_path.read_text()) if removed_path.exists() else {}
+
+    # 1. Detect files that s2k removed from the mirror since last run (deleted on Kindle).
+    for key, rel in list(manifest.items()):
+        if not (args.mirror / rel).exists() and key not in removed:
+            removed[key] = rel
+            print(f"removed on device -> will not re-mirror: {rel}")
+            del manifest[key]
+
+    db = snapshot_db(args.data_dir)
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    rows = con.execute(QUERY).fetchall()
+    con.close()
+    shutil.rmtree(db.parent, ignore_errors=True)
+
+    used, new_manifest = set(), {}
+    stats = dict(copied=0, kept=0, skipped_removed=0, missing=0)
+    for r in rows:
+        if args.library and r["libName"] not in args.library:
+            continue
+        key = f'{r["libraryID"]}/{r["attKey"]}'
+        if key in removed:
+            stats["skipped_removed"] += 1
+            continue
+        if not r["attPath"] or not r["attPath"].startswith("storage:"):
+            continue
+        src = args.data_dir / "storage" / r["attKey"] / r["attPath"][len("storage:"):]
+        if not src.exists():
+            stats["missing"] += 1
+            continue
+        rel = Path(sanitize(r["libName"])) / build_name(r)
+        # de-duplicate identical names (same paper in two items, multiple PDFs per item)
+        if str(rel).lower() in used:
+            rel = rel.with_name(f"{rel.stem} [{r['attKey']}].pdf")
+        used.add(str(rel).lower())
+        new_manifest[key] = str(rel)
+        dst = args.mirror / rel
+        if dst.exists() and dst.stat().st_size == src.stat().st_size:
+            stats["kept"] += 1
+            continue
+        stats["copied"] += 1
+        print(f"{'would copy' if args.dry_run else 'copy'}: {rel}")
+        if not args.dry_run:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
+    if args.prune:
+        for key, rel in manifest.items():
+            if key not in new_manifest and (args.mirror / rel).exists():
+                print(f"{'would prune' if args.dry_run else 'prune'} (gone from Zotero): {rel}")
+                if not args.dry_run:
+                    (args.mirror / rel).unlink()
+
+    if not args.dry_run:
+        manifest_path.write_text(json.dumps(new_manifest, indent=1, ensure_ascii=False))
+        removed_path.write_text(json.dumps(removed, indent=1, ensure_ascii=False))
+    print(f"\n{len(new_manifest)} PDFs in mirror: {stats}")
+
+
+if __name__ == "__main__":
+    main()

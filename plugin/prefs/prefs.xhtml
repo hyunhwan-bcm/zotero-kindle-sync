@@ -1,0 +1,45 @@
+<vbox xmlns="http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul"
+      xmlns:html="http://www.w3.org/1999/xhtml" style="padding: 8px 12px; gap: 10px">
+  <groupbox>
+    <label><html:h2>sync2kindle</html:h2></label>
+    <hbox align="center">
+      <label value="Path to s2k binary" style="width: 170px"/>
+      <html:input type="text" style="flex: 1" preference="extensions.zoterokindle.s2kPath"/>
+      <button id="zk-pick-s2k" label="Browse…"/>
+    </hbox>
+    <hbox align="center">
+      <label value="Mirror folder" style="width: 170px"/>
+      <html:input type="text" style="flex: 1" preference="extensions.zoterokindle.mirrorDir"/>
+      <button id="zk-pick-mirror" label="Browse…"/>
+    </hbox>
+    <description style="opacity: .7">
+      PDFs are copied here as &lt;Library&gt;/&lt;Author Year - Title&gt;.pdf and synced from here. Zotero's own storage is never touched by the device sync.
+    </description>
+    <hbox align="center">
+      <label value="Folder on Kindle" style="width: 170px"/>
+      <html:input type="text" style="flex: 1" preference="extensions.zoterokindle.target"/>
+    </hbox>
+  </groupbox>
+  <groupbox>
+    <label><html:h2>What to sync</html:h2></label>
+    <hbox align="center">
+      <label value="Libraries (comma separated, blank = all)" style="width: 260px"/>
+      <html:input type="text" style="flex: 1" preference="extensions.zoterokindle.libraries"/>
+    </hbox>
+    <checkbox label="Ignore deletions made on the Kindle (one-way sync)" preference="extensions.zoterokindle.ignoreDeviceRemovals"/>
+  </groupbox>
+  <groupbox>
+    <label><html:h2>Tags written back to Zotero</html:h2></label>
+    <hbox align="center">
+      <label value="Tag when a PDF is on the Kindle" style="width: 260px"/>
+      <html:input type="text" style="flex: 1" preference="extensions.zoterokindle.syncedTag"/>
+    </hbox>
+    <hbox align="center">
+      <label value="Tag when it was deleted on the Kindle" style="width: 260px"/>
+      <html:input type="text" style="flex: 1" preference="extensions.zoterokindle.removedTag"/>
+    </hbox>
+    <description style="opacity: .7">
+      An item tagged as removed is not sent again until you delete that tag.
+    </description>
+  </groupbox>
+</vbox>

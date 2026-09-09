@@ -1,0 +1,10 @@
+#---- sync2kindle configuration for the Zotero mirror (run s2k from this repo's root)
+#---- the mirror is a copy of Zotero attachments, so bidirectional removals never touch Zotero itself
+source: ./mirror
+target: documents/zotero
+history: ./state/history
+book_extensions: [.pdf]
+logging:
+    console: { level: normal }
+    file: { destination: state/s2k.log, level: debug, mode: overwrite }
+reporting: { destination: state/s2k-report.zip }

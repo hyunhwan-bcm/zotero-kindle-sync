@@ -1,0 +1,7 @@
+pref("extensions.zoterokindle.s2kPath", "");
+pref("extensions.zoterokindle.mirrorDir", "");
+pref("extensions.zoterokindle.target", "documents/zotero");
+pref("extensions.zoterokindle.libraries", "");
+pref("extensions.zoterokindle.removedTag", "kindle-removed");
+pref("extensions.zoterokindle.syncedTag", "on-kindle");
+pref("extensions.zoterokindle.ignoreDeviceRemovals", false);
